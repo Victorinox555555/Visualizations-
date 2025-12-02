@@ -12,99 +12,58 @@ This PR implements the **"Pre-merge References Before Description"** approach fo
 
 ```mermaid
 flowchart TD
-    subgraph TRIGGER["🔄 TRIGGER"]
-        A[User uploads additional document to existing RFX]
-    end
-
-    subgraph INIT["📦 STEP 1: Initialize"]
-        B[AiFindingsOrchestration initialized]
-        B --> C{doc_ids provided?}
-        C -->|Yes| D[extra_doc = TRUE]
-        C -->|No| E[extra_doc = FALSE]
-    end
-
-    subgraph STEP2["📋 STEP 2: Get Requirements"]
-        F[Fetch requirement from DB with embeddings]
-    end
-
-    subgraph STEP3["🔍 STEP 3: Get Embeddings from Milvus"]
-        G[Search Milvus for relevant chunks]
-        G --> H[Get text embeddings]
-        G --> I[Get vision embeddings]
-        H --> J[Combine into DataFrame]
-        I --> J
-    end
-
-    subgraph STEP4["🔗 STEP 4: Merge Back-to-Back"]
-        K[Merge consecutive chunks from same page]
-    end
-
-    subgraph STEP4_5["⭐ STEP 4.5: Pre-Merge References NEW"]
-        L{extra_doc?}
-        L -->|No| M[Skip - proceed to Step 5]
-        L -->|Yes| N[merge_references_before_description]
-        
-        N --> O[Query existing findings for this RFX]
-        O --> P{Existing finding for same requirement?}
-        
-        P -->|No| Q[Keep only new references]
-        
-        P -->|Yes| R{Existing match_category?}
-        R -->|NOT_MATCH| S[Mark for deletion, keep new refs only]
-        R -->|DIRECT/RELATED| T[Fetch existing references from DB]
-        
-        T --> U[get_references_by_finding_id]
-        U --> V[For each ref: fetch raw_text from Milvus]
-        V --> W[Get document name from DB]
-        W --> X[Add existing refs as rows to DataFrame]
-        X --> Y[Mark existing finding for deletion]
-        
-        S --> Z[Combined DataFrame with all refs]
-        Q --> Z
-        Y --> Z
-    end
-
-    subgraph STEP5["🤖 STEP 5: LLM Description Generation"]
-        AA[create_ai_name_and_description]
-        AA --> AB[LLM sees ALL references combined]
-        AB --> AC[Prompt includes conflict handling instruction]
-        AC --> AD["Generate unified description with inline conflicts
-        e.g., 'Max pressure: 85 dB from Doc A, 75 dB from Doc B'"]
-    end
-
-    subgraph STEP6["🗑️ STEP 6: Cleanup"]
-        AE{extra_doc?}
-        AE -->|No| AF[Skip]
-        AE -->|Yes| AG[delete_not_match_findings]
-        AG --> AH[Delete old findings marked in Step 4.5]
-    end
-
-    subgraph STEP7["💾 STEP 7: Save to Database"]
-        AI{extra_doc?}
-        AI -->|Yes| AJ[Filter out NOT_MATCH findings]
-        AI -->|No| AK[Delete existing findings for requirement]
-        AJ --> AL[Save new findings with all references]
-        AK --> AL
-    end
-
-    subgraph RESULT["✅ RESULT"]
-        AM[Single unified finding per requirement]
-        AM --> AN["Description shows all document sources
-        with inline conflict attribution"]
-    end
-
-    A --> B
+    %% TRIGGER
+    A["🔄 User uploads document to RFX"] --> B["📦 AiFindingsOrchestration initialized"]
+    
+    %% STEP 1: Determine path
+    B --> C{"doc_ids<br/>provided?"}
+    C -->|"Yes"| D["🔵 extra_doc = TRUE"]
+    C -->|"No"| E["🟢 extra_doc = FALSE"]
+    
+    %% SHARED STEPS 2-4
+    D --> F["📋 Step 2: Fetch requirements from DB"]
     E --> F
-    D --> F
-    F --> G
-    J --> K
-    K --> L
-    M --> AA
+    F --> G["🔍 Step 3: Get embeddings from Milvus"]
+    G --> H["🔗 Step 4: Merge back-to-back chunks"]
+    
+    %% DIVERGENCE POINT
+    H --> I{"extra_doc?"}
+    
+    %% ========== ADDITIONAL DOC PATH (LEFT) ==========
+    I -->|"🔵 TRUE"| J["⭐ Step 4.5: merge_references_before_description"]
+    J --> K["Query existing findings for RFX"]
+    K --> L{"Existing finding<br/>for requirement?"}
+    L -->|"No"| M["Use new refs only"]
+    L -->|"Yes"| N{"match_category?"}
+    N -->|"NOT_MATCH"| O["Mark old for deletion<br/>Use new refs only"]
+    N -->|"DIRECT/RELATED"| P["Fetch old refs from DB"]
+    P --> Q["Add old refs as rows to DataFrame"]
+    Q --> R["Mark old finding for deletion"]
+    
+    M --> S["Combined DataFrame"]
+    O --> S
+    R --> S
+    
+    S --> T["🤖 Step 5: LLM sees ALL refs<br/>Generates merged description"]
+    T --> U["🗑️ Step 6: delete_not_match_findings<br/>Delete old findings marked above"]
+    U --> V["💾 Step 7: Save new finding"]
+    
+    %% ========== NORMAL PATH (RIGHT) ==========
+    I -->|"🟢 FALSE"| W["Step 4.5: SKIP"]
+    W --> X["🤖 Step 5: LLM generates description"]
+    X --> Y["Step 6: SKIP"]
+    Y --> Z["💾 Step 7: Delete old + Save new"]
+    
+    %% RESULT
+    V --> AA["✅ Finding saved with merged refs"]
     Z --> AA
-    AD --> AE
-    AF --> AI
-    AH --> AI
-    AL --> AM
+    
+    %% Styling
+    style D fill:#4a90d9,color:#fff
+    style E fill:#5cb85c,color:#fff
+    style J fill:#f0ad4e,color:#000
+    style U fill:#d9534f,color:#fff
+    style AA fill:#5cb85c,color:#fff
 ```
 
 ---
