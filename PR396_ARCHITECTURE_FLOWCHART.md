@@ -20,11 +20,11 @@ flowchart TD
     A["🔄 User uploads document to RFX"] --> B["📦 Step 1: AiFindingsOrchestration initialized"]
     
     %% ==================== STEP 1: DETERMINE UPLOAD TYPE ====================
-    B --> C{"doc_ids<br/>provided?"}
-    C -->|"No"| INIT["🟢 INITIAL UPLOAD<br/>extra_doc = FALSE"]
-    C -->|"Yes"| D{"doc.original_document_id<br/>exists?"}
-    D -->|"No"| EXTRA["🔵 ADDITIONAL UPLOAD<br/>extra_doc = TRUE"]
-    D -->|"Yes"| REV["🟠 REVISION UPLOAD<br/>extra_doc = TRUE"]
+    B --> C{"doc_ids parameter<br/>provided in API call?"}
+    C -->|"No (process all docs)"| INIT["🟢 INITIAL UPLOAD<br/>extra_doc = FALSE<br/><br/>Examples:<br/>• First upload to new RFX<br/>• Upload multiple docs at once"]
+    C -->|"Yes (specific doc IDs)"| D{"Does new doc have<br/>original_document_id set?"}
+    D -->|"No (new doc, not replacing)"| EXTRA["🔵 ADDITIONAL UPLOAD<br/>extra_doc = TRUE<br/><br/>Examples:<br/>• Add Doc3 to RFX with Doc1"]
+    D -->|"Yes (replacing another doc)"| REV["🟠 REVISION UPLOAD<br/>extra_doc = TRUE<br/><br/>Examples:<br/>• Revise original Doc1 → Doc2<br/>• Revise additional Doc3 → Doc4<br/>• Revise multiple docs at once"]
     
     %% ==================== SHARED STEPS 2-4 ====================
     INIT --> S2
@@ -47,10 +47,10 @@ flowchart TD
     %% ==================== 🔵 ADDITIONAL UPLOAD PATH ====================
     CHECK -->|"TRUE + no original_doc_id"| ADD_45["⭐ Step 4.5: merge_references_before_description"]
     ADD_45 --> ADD_GET["Get existing finding for RFX"]
-    ADD_GET --> ADD_REFS["Fetch existing refs from DB<br/>(e.g., Doc1 refs)"]
-    ADD_REFS --> ADD_CHECK{"original_doc_ids?"}
-    ADD_CHECK -->|"None"| ADD_KEEP["Keep ALL existing refs"]
-    ADD_KEEP --> ADD_COMBINE["DataFrame = existing refs + new refs<br/>(Doc1 + Doc3)"]
+    ADD_GET --> ADD_REFS["Fetch existing refs from DB"]
+    ADD_REFS --> ADD_CHECK{"original_doc_ids<br/>list empty?"}
+    ADD_CHECK -->|"Yes (empty list)"| ADD_KEEP["Keep ALL existing refs<br/>(nothing to filter)"]
+    ADD_KEEP --> ADD_COMBINE["DataFrame = all existing refs + new refs"]
     ADD_COMBINE --> ADD_5["🤖 Step 5: LLM sees ALL refs<br/>→ generates merged description"]
     ADD_5 --> ADD_6["💾 Step 6: save_ai_findings_for_requirement<br/>• UPDATE existing finding (preserves comments)<br/>• DELETE old refs, SAVE new refs"]
     ADD_6 --> RESULT
@@ -58,12 +58,12 @@ flowchart TD
     %% ==================== 🟠 REVISION UPLOAD PATH ====================
     CHECK -->|"TRUE + has original_doc_id"| REV_45["⭐ Step 4.5: merge_references_before_description"]
     REV_45 --> REV_GET["Get existing finding for RFX"]
-    REV_GET --> REV_REFS["Fetch existing refs from DB<br/>(e.g., Doc1 + Doc3 refs)"]
-    REV_REFS --> REV_CHECK{"original_doc_ids?"}
-    REV_CHECK -->|"[Doc1.id]"| REV_FILTER["⭐ FILTER: Remove refs where<br/>document_id in original_doc_ids"]
-    REV_FILTER --> REV_RESULT["Doc1 refs → ❌ REMOVED<br/>Doc3 refs → ✅ KEPT"]
-    REV_RESULT --> REV_COMBINE["DataFrame = kept refs + new refs<br/>(Doc3 + Doc2)"]
-    REV_COMBINE --> REV_5["🤖 Step 5: LLM sees Doc3 + Doc2 refs<br/>→ generates merged description"]
+    REV_GET --> REV_REFS["Fetch existing refs from DB"]
+    REV_REFS --> REV_CHECK{"original_doc_ids<br/>list has values?"}
+    REV_CHECK -->|"Yes (e.g. [Doc1.id] or [Doc3.id])"| REV_FILTER["⭐ FILTER: Remove refs where<br/>document_id in original_doc_ids<br/><br/>Works for ANY revision:<br/>• Original doc revision<br/>• Additional doc revision<br/>• Multiple doc revisions"]
+    REV_FILTER --> REV_RESULT["Revised doc refs → ❌ REMOVED<br/>Other doc refs → ✅ KEPT"]
+    REV_RESULT --> REV_COMBINE["DataFrame = kept refs + new refs"]
+    REV_COMBINE --> REV_5["🤖 Step 5: LLM sees remaining + new refs<br/>→ generates merged description"]
     REV_5 --> REV_6["💾 Step 6: save_ai_findings_for_requirement<br/>• UPDATE existing finding (preserves comments)<br/>• DELETE old refs, SAVE new refs"]
     REV_6 --> RESULT
     
@@ -78,6 +78,20 @@ flowchart TD
     style REV_RESULT fill:#5cb85c,color:#fff
     style RESULT fill:#5cb85c,color:#fff
 ```
+
+---
+
+## All Possible Cases Summary
+
+| Case | `doc_ids` | `original_document_id` | Path | Result |
+|------|-----------|------------------------|------|--------|
+| Initial upload (1+ docs) | `None` | N/A | 🟢 INITIAL | DELETE/CREATE finding |
+| Add new doc to RFX | `[NewDoc.id]` | `None` | 🔵 ADDITIONAL | UPDATE, keep all old refs |
+| Revise original RFX doc | `[Doc2.id]` | `Doc1.id` | 🟠 REVISION | UPDATE, filter Doc1 refs |
+| Revise additional doc | `[Doc4.id]` | `Doc3.id` | 🟠 REVISION | UPDATE, filter Doc3 refs |
+| Revise multiple docs | `[Doc2.id, Doc4.id]` | `Doc1.id, Doc3.id` | 🟠 REVISION | UPDATE, filter both |
+
+**Key insight:** The 🟠 REVISION path is the SAME whether you're revising an original doc or an additional doc - the `original_document_id` field determines which refs get filtered out.
 
 ---
 
@@ -243,6 +257,55 @@ RESULT: Finding with Doc3 + Doc2 refs, merged description ✅
          (Doc1 refs correctly removed, Doc3 refs preserved)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
+
+---
+
+### Scenario 4: Revise an ADDITIONAL doc (Doc3 → Doc4) - SAME PATH AS SCENARIO 3
+
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Starting state: RFX has Doc1 + Doc3
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Upload Doc4 (Revision of Doc3 - the additional doc)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+API: create_ai_findings(rfx_id, req_id, doc_ids=[Doc4.id])
+
+__init__:
+  • doc_ids = [Doc4.id] → extra_doc = TRUE
+  • self.doc_ids = [Doc4.id]
+  • self.documents = [Doc4] where Doc4.original_document_id = Doc3.id
+
+Step 2: Fetch requirement from DB
+Step 3: Get embeddings from Milvus (Doc4 ONLY - new doc)
+Step 4: Merge back-to-back chunks
+
+Step 4.5: merge_references_before_description (extra_doc = TRUE)
+  • Get existing findings for RFX → finds Finding with Doc1 + Doc3 refs
+  • self.findings_to_update[req_id] = existing_finding_id
+  • Get existing refs (Doc1 refs + Doc3 refs)
+  • Check for original_doc_ids → [Doc3.id] (IS a revision!)
+  • ⭐ FILTER: Remove refs where document_id in [Doc3.id]
+    - Doc1 refs → ✅ KEPT (not being revised)
+    - Doc3 refs → ❌ REMOVED (being replaced by Doc4)
+  • Add Doc1 refs to DataFrame
+  • DataFrame = Doc1 refs + Doc4 refs
+
+Step 5: LLM sees Doc1 + Doc4 refs → generates merged description
+
+Step 6 (save_ai_findings_for_requirement):
+  • extra_doc = TRUE → does NOT delete existing finding
+  • existing_finding_id exists → UPDATE mode
+  • Update description and match_category (preserves user comments!)
+  • Delete old refs, save new refs (Doc1 + Doc4)
+
+RESULT: Finding with Doc1 + Doc4 refs, merged description ✅
+         (Doc3 refs correctly removed, Doc1 refs preserved)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+**Note:** Scenario 3 and 4 use the EXACT SAME code path (🟠 REVISION). The only difference is WHICH document's refs get filtered out, determined by `original_document_id`.
 
 ---
 
