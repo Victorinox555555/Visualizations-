@@ -1,69 +1,101 @@
-# PR #396 - AI Findings Extra Document Flow Architecture
+# PR #396 - AI Findings Document Upload Flow Architecture
 
 ## Overview
 
-This PR implements the **"Pre-merge References Before Description"** approach for handling additional document uploads in AI Findings generation. When a user uploads additional documents to an existing RFX, the system merges references from both old and new documents BEFORE generating the description, allowing the LLM to see all context and create a unified description with inline conflict handling.
+This PR handles **three scenarios** for AI Findings generation:
+1. **Initial Upload** - First document(s) uploaded to RFX
+2. **Additional Upload** - Adding new documents to existing RFX
+3. **Revision Upload** - Replacing an existing document with a new version
 
-**Important**: This PR does NOT include special revision handling - revisions are treated the same as additional uploads (all references merged together).
+The key innovation is the **"Pre-merge References Before Description"** approach - merging old + new references BEFORE LLM generates description.
 
 ---
 
-## Flow Chart (Mermaid)
+## Complete Flow Chart (Mermaid)
 
 ```mermaid
 flowchart TD
-    %% TRIGGER
+    %% ==================== TRIGGER ====================
     A["🔄 User uploads document to RFX"] --> B["📦 AiFindingsOrchestration initialized"]
     
-    %% STEP 1: Determine path
+    %% ==================== STEP 1: DETERMINE UPLOAD TYPE ====================
     B --> C{"doc_ids<br/>provided?"}
-    C -->|"Yes"| D["🔵 extra_doc = TRUE"]
-    C -->|"No"| E["🟢 extra_doc = FALSE"]
+    C -->|"No"| INIT["🟢 INITIAL UPLOAD<br/>extra_doc = FALSE"]
+    C -->|"Yes"| D{"original_document_id<br/>exists?"}
+    D -->|"No"| EXTRA["🔵 ADDITIONAL UPLOAD<br/>extra_doc = TRUE"]
+    D -->|"Yes"| REV["🟠 REVISION UPLOAD<br/>extra_doc = TRUE"]
     
-    %% SHARED STEPS 2-4
-    D --> F["📋 Step 2: Fetch requirements from DB"]
-    E --> F
-    F --> G["🔍 Step 3: Get embeddings from Milvus"]
-    G --> H["🔗 Step 4: Merge back-to-back chunks"]
+    %% ==================== SHARED STEPS 2-4 ====================
+    INIT --> SHARED
+    EXTRA --> SHARED
+    REV --> SHARED
     
-    %% DIVERGENCE POINT
-    H --> I{"extra_doc?"}
+    subgraph SHARED["📋 STEPS 2-4: Common Processing"]
+        S2["Step 2: Fetch requirements from DB"]
+        S2 --> S3["Step 3: Get embeddings from Milvus<br/>(only from NEW doc_ids)"]
+        S3 --> S4["Step 4: Merge back-to-back chunks"]
+    end
     
-    %% ========== ADDITIONAL DOC PATH (LEFT) ==========
-    I -->|"🔵 TRUE"| J["⭐ Step 4.5: merge_references_before_description"]
-    J --> K["Query existing findings for RFX"]
-    K --> L{"Existing finding<br/>for requirement?"}
-    L -->|"No"| M["Use new refs only"]
-    L -->|"Yes"| N{"match_category?"}
-    N -->|"NOT_MATCH"| O["Mark old for deletion<br/>Use new refs only"]
-    N -->|"DIRECT/RELATED"| P["Fetch old refs from DB"]
-    P --> Q["Add old refs as rows to DataFrame"]
-    Q --> R["Mark old finding for deletion"]
+    %% ==================== DIVERGENCE ====================
+    SHARED --> CHECK{"extra_doc?"}
     
-    M --> S["Combined DataFrame"]
-    O --> S
-    R --> S
+    %% ==================== 🟢 INITIAL UPLOAD PATH ====================
+    CHECK -->|"FALSE"| INIT_PATH
+    subgraph INIT_PATH["🟢 INITIAL UPLOAD PATH"]
+        I1["Skip Step 4.5"]
+        I1 --> I2["🤖 Step 5: LLM generates description"]
+        I2 --> I3["Skip Step 6"]
+        I3 --> I4["💾 Step 7: Save findings"]
+    end
     
-    S --> T["🤖 Step 5: LLM sees ALL refs<br/>Generates merged description"]
-    T --> U["🗑️ Step 6: delete_not_match_findings<br/>Delete old findings marked above"]
-    U --> V["💾 Step 7: Save new finding"]
+    %% ==================== 🔵 ADDITIONAL UPLOAD PATH ====================
+    CHECK -->|"TRUE + no revision"| ADD_PATH
+    subgraph ADD_PATH["🔵 ADDITIONAL UPLOAD PATH"]
+        A1["⭐ Step 4.5: merge_references_before_description"]
+        A1 --> A2["Get existing findings for RFX"]
+        A2 --> A3{"Existing finding<br/>for requirement?"}
+        A3 -->|"No"| A4["Keep new refs only"]
+        A3 -->|"Yes"| A5["Fetch OLD refs from DB<br/>(Doc1 + Doc3 refs)"]
+        A5 --> A6["Add old refs to DataFrame"]
+        A6 --> A7["Mark old finding for deletion"]
+        A4 --> A8["Combined DataFrame:<br/>Doc1 refs + Doc3 refs + NEW refs"]
+        A7 --> A8
+        A8 --> A9["🤖 Step 5: LLM sees ALL refs<br/>Generates merged description"]
+        A9 --> A10["🗑️ Step 6: Delete old finding"]
+        A10 --> A11["💾 Step 7: Save merged finding"]
+    end
     
-    %% ========== NORMAL PATH (RIGHT) ==========
-    I -->|"🟢 FALSE"| W["Step 4.5: SKIP"]
-    W --> X["🤖 Step 5: LLM generates description"]
-    X --> Y["Step 6: SKIP"]
-    Y --> Z["💾 Step 7: Delete old + Save new"]
+    %% ==================== 🟠 REVISION UPLOAD PATH ====================
+    CHECK -->|"TRUE + has revision"| REV_PATH
+    subgraph REV_PATH["🟠 REVISION UPLOAD PATH (Doc1→Doc4)"]
+        R1["⭐ Step 4.5: merge_references_before_description"]
+        R1 --> R2["Get existing findings for RFX"]
+        R2 --> R3["Fetch OLD refs from DB"]
+        R3 --> R4{"Is ref from<br/>original_document_id?<br/>(Doc1)"}
+        R4 -->|"Yes (Doc1)"| R5["❌ EXCLUDE - being replaced"]
+        R4 -->|"No (Doc3)"| R6["✅ KEEP - not being revised"]
+        R5 --> R7["Combined DataFrame:<br/>Doc3 refs (kept) + Doc4 refs (new)"]
+        R6 --> R7
+        R7 --> R8["🤖 Step 5: LLM sees Doc3 + Doc4 refs<br/>(Doc1 refs excluded)"]
+        R8 --> R9["🗑️ Step 6: Delete old finding"]
+        R9 --> R10["💾 Step 7: Save finding with<br/>Doc3 + Doc4 references"]
+    end
     
-    %% RESULT
-    V --> AA["✅ Finding saved with merged refs"]
-    Z --> AA
+    %% ==================== RESULT ====================
+    INIT_PATH --> RESULT
+    ADD_PATH --> RESULT
+    REV_PATH --> RESULT
     
-    %% Styling
-    style D fill:#4a90d9,color:#fff
-    style E fill:#5cb85c,color:#fff
-    style J fill:#f0ad4e,color:#000
-    style U fill:#d9534f,color:#fff
-    style AA fill:#5cb85c,color:#fff
+    subgraph RESULT["✅ RESULT"]
+        RES["Finding saved to database"]
+    end
+    
+    %% ==================== STYLING ====================
+    style INIT fill:#5cb85c,color:#fff
+    style EXTRA fill:#4a90d9,color:#fff
+    style REV fill:#f0ad4e,color:#000
+    style R5 fill:#d9534f,color:#fff
+    style R6 fill:#5cb85c,color:#fff
 ```
 
 ---
@@ -128,26 +160,94 @@ Step 7: Save to database
 
 ---
 
-## Data Flow Example
+## Data Flow Examples
 
-### Scenario: User has Doc1, uploads Doc3 (additional)
+### Scenario 1: Initial Upload (Doc1)
 
 ```
-BEFORE (Doc1 only):
+USER ACTION: Upload Doc1 to new RFX
+
+RESULT:
 ┌─────────────────────────────────────────────────────────┐
 │ Finding: "Acoustic Enclosure"                           │
-│ Description: "Max pressure: 85 dB, Rating: IP54..."     │
-│ References: [Doc1 chunk1, Doc1 chunk2]                  │
+│ Description: "Max pressure: 85 dB, Rating: IP54,        │
+│              Ventilation: Forced air cooling..."        │
+│ References: [Doc1 refs]                                 │
 └─────────────────────────────────────────────────────────┘
+```
 
-AFTER (Doc1 + Doc3):
+### Scenario 2: Additional Upload (Doc1 + Doc3)
+
+```
+USER ACTION: Add Doc3 to existing RFX (already has Doc1)
+
+PROCESS:
+1. Get new embeddings from Doc3 only
+2. Fetch existing refs from DB (Doc1 refs)
+3. Combine: Doc1 refs + Doc3 refs
+4. LLM sees ALL refs → generates merged description
+
+RESULT:
 ┌─────────────────────────────────────────────────────────┐
 │ Finding: "Acoustic Enclosure"                           │
 │ Description: "Max pressure: 85 dB from Doc1,            │
 │              75 dB from Doc3. Rating: IP54 from Doc1,   │
-│              IP65 from Doc3..."                         │
-│ References: [Doc1 chunk1, Doc1 chunk2, Doc3 chunk1]     │
+│              IP65 from Doc3. Ventilation: Forced air    │
+│              from Doc1, Natural convection from Doc3"   │
+│ References: [Doc1 refs + Doc3 refs]                     │
 └─────────────────────────────────────────────────────────┘
+```
+
+### Scenario 3: Revision Upload (Doc1→Doc4) - THE BUG WE FIXED
+
+```
+USER ACTION: Revise Doc1 with Doc4 (RFX already has Doc1 + Doc3)
+
+🐛 OLD BUG: Doc3 refs were being deleted!
+
+✅ FIXED PROCESS:
+1. Detect: Doc4 has original_document_id = Doc1 (it's a revision)
+2. Get new embeddings from Doc4 only
+3. Fetch existing refs from DB (Doc1 refs + Doc3 refs)
+4. FILTER: 
+   - Doc1 refs → ❌ EXCLUDE (being replaced by Doc4)
+   - Doc3 refs → ✅ KEEP (not being revised)
+5. Combine: Doc3 refs (kept) + Doc4 refs (new)
+6. LLM sees Doc3 + Doc4 refs → generates merged description
+
+RESULT:
+┌─────────────────────────────────────────────────────────┐
+│ Finding: "Acoustic Enclosure"                           │
+│ Description: "Max pressure: 85 dB from Doc4,            │
+│              75 dB from Doc3. Rating: IP54 from Doc4,   │
+│              IP65 from Doc3. (No Ventilation from Doc4, │
+│              Natural convection from Doc3)"             │
+│ References: [Doc3 refs + Doc4 refs] ← Doc1 refs gone!   │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Visual Timeline of the Bug Scenario
+
+```
+Step 1: Upload Doc1
+        ┌──────────┐
+        │   Doc1   │  → Finding has Doc1 refs
+        └──────────┘
+
+Step 2: Add Doc3 (additional)
+        ┌──────────┐  ┌──────────┐
+        │   Doc1   │  │   Doc3   │  → Finding has Doc1 + Doc3 refs ✅
+        └──────────┘  └──────────┘
+
+Step 3: Revise Doc1 → Doc4
+        ┌──────────┐  ┌──────────┐
+        │   Doc4   │  │   Doc3   │
+        │(replaces │  │ (kept)   │  → Finding has Doc3 + Doc4 refs ✅
+        │  Doc1)   │  │          │     Doc1 refs correctly removed
+        └──────────┘  └──────────┘
+
+🐛 OLD BUG: Step 3 would DELETE Doc3 refs too!
+✅ FIX: Only delete refs from original_document_id (Doc1), keep Doc3
 ```
 
 ---
@@ -180,22 +280,46 @@ AFTER (Doc1 + Doc3):
 
 ## Testing Scenarios
 
-1. **Initial Upload**: Doc1 → Creates findings with Doc1 refs only
-2. **Additional Upload**: Doc1 + Doc3 → Merges old refs + new refs, shows conflicts inline
-3. **NOT_MATCH Replacement**: If existing was NOT_MATCH, delete old finding, create new with only new refs
-4. **DIRECT/RELATED Merge**: If existing had content, merge all refs into new finding, delete old finding
-
-**Note**: This PR treats revisions the same as additional uploads - it merges all references together. Special revision filtering (replacing old doc refs) is NOT implemented in this PR.
+| Scenario | Action | Expected Result |
+|----------|--------|-----------------|
+| 1. Initial Upload | Upload Doc1 to new RFX | Finding with Doc1 refs only |
+| 2. Additional Upload | Add Doc3 to RFX with Doc1 | Finding with Doc1 + Doc3 refs, inline conflicts |
+| 3. Revision Upload | Revise Doc1→Doc4 (RFX has Doc1+Doc3) | Finding with Doc3 + Doc4 refs (Doc1 refs removed) |
+| 4. NOT_MATCH Replacement | Upload doc to RFX with NOT_MATCH finding | Old finding deleted, new created with new refs |
 
 ---
 
-## What This PR Does NOT Include
+## Key Bug Fixed
 
-| Feature | Status | Notes |
-|---------|--------|-------|
-| Revision filtering by `original_document_id` | ❌ Not included | Revisions merge all refs like additional uploads |
-| UPDATE existing findings (preserve user edits) | ❌ Not included | Old findings are DELETED, new ones CREATED |
-| Embedding ID fix for merged chunks | ❌ Not included | Was in older PR, not this one |
-| Batch Milvus calls optimization | ❌ Not included | Individual `get_embedding` calls per ref |
+### The Doc3 Deletion Bug
+
+**Problem**: When user had Doc1 + Doc3, then revised Doc1 with Doc4, the system was deleting ALL old refs including Doc3.
+
+**Root Cause**: The system wasn't distinguishing between:
+- Refs from the document being revised (Doc1) - should be deleted
+- Refs from other documents (Doc3) - should be kept
+
+**Solution**: Filter refs by `original_document_id`:
+```python
+# In merge_references_before_description:
+old_doc_ids = [doc.original_document_id for doc in docs if doc.original_document_id]
+
+# When fetching old refs:
+for ref in existing_refs:
+    if ref.document_id in old_doc_ids:
+        continue  # Skip - this doc is being revised
+    # Keep refs from other documents (Doc3)
+```
+
+---
+
+## What This PR Includes
+
+| Feature | Status | Description |
+|---------|--------|-------------|
+| Pre-merge references before LLM | ✅ | Old + new refs combined before description generation |
+| Revision filtering by `original_document_id` | ✅ | Only delete refs from revised doc, keep others |
+| Inline conflict handling in prompt | ✅ | LLM shows "85 dB from Doc1, 75 dB from Doc3" |
+| Delete old findings after regeneration | ✅ | Prevents duplicate findings |
 
 
